@@ -1,3 +1,24 @@
+# DSP_audioI2S
+
+Independent community fork of [ESP32-audioI2S](https://github.com/schreibfaul1/ESP32-audioI2S) by schreibfaul1 (Wolle). This repository is not an official Wolle release. Thanks to schreibfaul1 for the original library.
+
+- Upstream base: [`3b0fe2682c01c64ebe8cb2980e6f9e7608884fe4`](https://github.com/schreibfaul1/ESP32-audioI2S/commit/3b0fe2682c01c64ebe8cb2980e6f9e7608884fe4) (`4.0.0-64-g3b0fe26`)
+- Package version: `0.1.0`. The runtime string `audioI2SVers` is still upstream `4.0.0t`, because the audio sources have not been changed.
+- Status: clean fork baseline. Radio recovery, a modern Engine, typed events, a canonical PCM boundary and reusable DSP blocks are goals. They are not implemented.
+
+Project goals:
+
+- maintain a public fork of the Wolle 4.x line;
+- keep drop-in source compatibility through `#include <Audio.h>` and class `Audio` as far as possible;
+- improve radio streaming and reconnect reliability;
+- add a modern Engine, typed events and a canonical PCM boundary;
+- add reusable DSP processing blocks;
+- keep an ordinary I2S path for third-party projects.
+
+Source compatibility is a goal. Binary ABI compatibility is not promised.
+
+The text below is the inherited upstream documentation.
+
 # ESP32-audioI2S
 
 :warning: **This library only works on multi-core chips like ESP32-S3, ESP32-S31 and ESP32-P4. <br>
