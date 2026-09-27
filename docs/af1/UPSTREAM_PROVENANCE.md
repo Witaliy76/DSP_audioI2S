@@ -38,14 +38,15 @@ Runtime-строка `audioI2SVers` в `src/Audio.cpp` остаётся upstream
 |---|---|---|
 | AF-1.0 | `3b0fe2682c01c64ebe8cb2980e6f9e7608884fe4` | принятая upstream-база, без изменений аудиокода форка |
 | AF-1.1 | `a96ced86008514cc38509d3f381ccdb9ec9e7113` | контрольная сборка ESP32-S3; `night_build` принял её fast-forward |
+| AF-1.2 | `cd4b1273c79c98fafe6ddc58ba4a12ae92a9f227` | package identity, README и upstream provenance без изменений аудиокода |
 
 Относительно upstream baseline нет изменений runtime и поведения аудио. `src/**`, декодеры, примеры и `LICENSE` остаются исходными.
 
 ## Ветки
 
-- `main` — стабильная принятая версия. Сейчас это ещё чистая база AF-1.0.
-- `night_build` — кандидат для интеграции и проверки. Сейчас на AF-1.1.
-- `feature/*` и `fix/*` — отдельные срезы. Они не являются стабильными релизами.
+- `main` — стабильная принятая версия.
+- `night_build` — integration/testing candidate.
+- `feature/*` и `fix/*` — отдельные рабочие срезы.
 
 ## Дальше
 
