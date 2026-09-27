@@ -1,0 +1,3 @@
+# PlatformIO output and the isolated core that runs this baseline.
+**/.pio/
+.venv/
