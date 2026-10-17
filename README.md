@@ -2,9 +2,9 @@
 
 Independent community fork of [ESP32-audioI2S](https://github.com/schreibfaul1/ESP32-audioI2S) by schreibfaul1 (Wolle). This repository is not an official Wolle release. Thanks to schreibfaul1 for the original library.
 
-- Upstream base: [`3b0fe2682c01c64ebe8cb2980e6f9e7608884fe4`](https://github.com/schreibfaul1/ESP32-audioI2S/commit/3b0fe2682c01c64ebe8cb2980e6f9e7608884fe4) (`4.0.0-64-g3b0fe26`)
-- Package version: `0.1.0`. The runtime string `audioI2SVers` is still upstream `4.0.0t`, because the audio sources have not been changed.
-- Status: clean fork baseline. Radio recovery, a modern Engine, typed events, a canonical PCM boundary and reusable DSP blocks are goals. They are not implemented.
+- Upstream base: [`45db75394e9cfc8ad3cea2b6b4beab558df83134`](https://github.com/schreibfaul1/ESP32-audioI2S/commit/45db75394e9cfc8ad3cea2b6b4beab558df83134) (`4.0.0w`)
+- Package version: `0.1.0`. The runtime string `audioI2SVers` is upstream `4.0.0w`; fork audio sources match this accepted upstream snapshot.
+- Status: clean fork baseline synchronized with upstream on 2026-10-17. Radio recovery, a modern Engine, typed events, a canonical PCM boundary and reusable DSP blocks are goals. They are not implemented.
 
 Project goals:
 
@@ -32,7 +32,7 @@ Container formats: ogg, mp4, m3u8 <br>
 
 The output sample rate can be set to a fixed value of 44.1 or 48 kHz if required by the external I²S device
 
-Works with MAX98357A (3 Watt amplifier with DAC), connected three lines (DOUT, BLCK, LRC) to I2S. The I2S output frequency is always 48kHz, regardless of the input source, so Bluetooth devices can also be connected without any problems.
+Works with [MAX98357A](https://github.com/schreibfaul1/ESP32-audioI2S/discussions/1406) (3 Watt amplifier with DAC), connected three lines (DOUT, BLCK, LRC) to I2S. The I2S output frequency is always 48kHz, regardless of the input source, so Bluetooth devices can also be connected without any problems.
 For stereo are two MAX98357A necessary. AudioI2S works with UDA1334A (Adafruit I2S Stereo Decoder Breakout Board), PCM5102A and CS4344.
 Other HW may work but not tested. Plays also icy-streams, GoogleTTS and OpenAIspeech. Can be compiled with Arduino IDE. [WIKI](https://github.com/schreibfaul1/ESP32-audioI2S/wiki)
 

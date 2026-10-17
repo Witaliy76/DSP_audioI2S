@@ -4,8 +4,8 @@
 
     Created on: 28.10.2018                                                                                                  */
 char audioI2SVers[] = "\
-    Version 4.0.0t                                                                                                                         ";
-/*  Updated on: Sep 18, 2026
+    Version 4.0.0w                                                                                                                         ";
+/*  Updated on: Oct 12, 2026
 
     Author: Wolle (schreibfaul1)
     Audio library for ESP32, ESP32-S3 or ESP32-P4
@@ -34,7 +34,7 @@ constexpr size_t m_frameSizeVORBIS = UINT16_MAX; // OGG length is normally 4080 
 constexpr size_t m_outbuffSize = 4608 * 2;
 constexpr size_t m_resamplesBuffSize = m_outbuffSize * 8; // SRmin: 6KHz -> SRmax: 48K
 
-constexpr size_t AUDIO_STACK_SIZE = 3900;
+constexpr size_t AUDIO_STACK_SIZE = 4000;
 
 // static allocations for Audio task
 StaticTask_t __attribute__((unused)) xAudioTaskBuffer;
@@ -5512,9 +5512,14 @@ bool Audio::parseHttpResponseHeader() { // this is the response to a GET / reque
             case HeaderResult::Continue: break;
             case HeaderResult::ContentTypeSeen: ct_seen = true; break;
             case HeaderResult::Redirect:
-                m_client->stop();
-                httpPrint(redirectUrl.c_get());
-                return true;
+                if(redirectUrl.starts_with("http")){
+                    m_client->stop();
+                    httpPrint(redirectUrl.c_get());
+                    return true;
+                }
+                // http://live.rockmelodic-radio.com:8124/ --> Location:index.html?sid=1
+                // so do nothing and try a different user agent
+                break;
             case HeaderResult::Error: goto exit;
         }
         AUDIO_LOG_DEBUG("name: {}, value; {}", name, value);
@@ -5647,7 +5652,7 @@ bool Audio::initializeDecoder() {
 
     if (type) {
         m_decoder = createDecoder(type);
-        if (!m_decoder || !m_decoder->init()) {
+        if (!m_decoder || !m_decoder->init(m_outbuffSize)) {
             AUDIO_LOG_ERROR("The {Decoder could not be initialized", type);
             stopSong();
             return false;
@@ -6100,7 +6105,7 @@ uint32_t Audio::decodeError(int8_t res, uint8_t* data, int32_t bytesDecoded) {
             }
         }
         m_decoder->reset();
-        m_decoder->init();
+        m_decoder->init(m_outbuffSize);
         return 0;
     }
     if (m_codec == CODEC_MP3) {
