@@ -2,7 +2,7 @@
   "name": "DSP_audioI2S",
   "version": "0.1.0",
   "description": "Independent community fork of schreibfaul1/ESP32-audioI2S for an I2S web radio on ESP32-class boards. Not an official Wolle release.",
-  "keywords": "audio, i2s, esp32, esp32-s3, esp32-p4",
+  "keywords": "audio, i2s, esp32, esp32-s3, esp32-s31, esp32-p4",
   "repository": {
     "type": "git",
     "url": "https://github.com/Witaliy76/DSP_audioI2S.git"

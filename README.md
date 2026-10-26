@@ -2,9 +2,9 @@
 
 Independent community fork of [ESP32-audioI2S](https://github.com/schreibfaul1/ESP32-audioI2S) by schreibfaul1 (Wolle). This repository is not an official Wolle release. Thanks to schreibfaul1 for the original library.
 
-- Upstream base: [`45db75394e9cfc8ad3cea2b6b4beab558df83134`](https://github.com/schreibfaul1/ESP32-audioI2S/commit/45db75394e9cfc8ad3cea2b6b4beab558df83134) (`4.0.0w`)
-- Package version: `0.1.0`. The runtime string `audioI2SVers` is upstream `4.0.0w`; fork audio sources match this accepted upstream snapshot.
-- Status: clean fork baseline synchronized with upstream on 2026-10-17. Radio recovery, a modern Engine, typed events, a canonical PCM boundary and reusable DSP blocks are goals. They are not implemented.
+- Upstream base: [`5bf339285bf681d8be2cc84a5f7529a12f2f7514`](https://github.com/schreibfaul1/ESP32-audioI2S/commit/5bf339285bf681d8be2cc84a5f7529a12f2f7514) (`4.0.1`)
+- Package version: `0.1.0`. The runtime string `audioI2SVers` is upstream `4.0.1`; fork audio sources match this accepted upstream snapshot.
+- Status: clean fork baseline synchronized with upstream 4.0.1 on 2026-10-26. Radio recovery, a modern Engine, typed events, a canonical PCM boundary and reusable DSP blocks are goals. They are not implemented.
 
 Project goals:
 
@@ -22,7 +22,7 @@ The text below is the inherited upstream documentation.
 # ESP32-audioI2S
 
 :warning: **This library only works on multi-core chips like ESP32-S3, ESP32-S31 and ESP32-P4. <br>
-The ESP32 is suitable to a limited extent. <br>
+The ESP32 is suitable to a limited extent. <ins>PSRAM is required!</ins><br>
 It does not work on the ESP32-S2, ESP32-C3 etc** :warning:
 
 Supported codecs: wav, mp3, aac, flac, opus, vorbis <br>
