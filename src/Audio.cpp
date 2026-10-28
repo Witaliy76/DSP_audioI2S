@@ -16,6 +16,7 @@ char audioI2SVers[] = "\
 *****************************************************************************************************************************************************/
 
 #include "Audio.h"
+#include "audio_url.h"
 #include "aac_decoder/aac_decoder.h"
 #include "flac_decoder/flac_decoder.h"
 #include "mp3_decoder/mp3_decoder.h"
@@ -1003,53 +1004,17 @@ bool Audio::openai_speech(const char* api_key, const char* model, const char* in
 }
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
 audiolib::hwoe_t Audio::dismantle_host(const char* host) {
-    if (!host) return {};
+    audiolib::hwoe_t        result{};
+    audiolib::ParsedHttpUrl parts;
+    if (!audiolib::tryParseHttpEndpoint(host, &parts)) return result;
 
-    audiolib::hwoe_t result;
-
-    const char* p = host;
-
-    // 🔐 1. SSL check
-    if (strncmp(p, "https://", 8) == 0) {
-        result.ssl = true;
-        p += 8;
-    } else if (strncmp(p, "http://", 7) == 0) {
-        result.ssl = false;
-        p += 7;
-    } else { // No valid scheme -> error or acceptance http
-        result.ssl = false;
-    }
-
-    // ❓ 2. extract host (from p to ':' or '/' or '?')
-    const char* host_start = p;
-    const char* port_sep = strchr(p, ':');
-    const char* path_sep = strchr(p, '/');
-    const char* query_sep = strchr(p, '?');
-
-    const char* host_end = p + strlen(p); // default: end of string
-    if (port_sep && port_sep < host_end) host_end = port_sep;
-    if (path_sep && path_sep < host_end) host_end = path_sep;
-    if (query_sep && query_sep < host_end) host_end = query_sep;
-    result.hwoe.copy_from(host_start, host_end - host_start);
+    result.ssl = parts.ssl;
+    result.port = parts.port;
+    result.hwoe.copy_from(parts.host, parts.host_len);
     result.rqh_host.clone_from(result.hwoe);
-
-    // ❓ 3. extract port
-    result.port = result.ssl ? 443 : 80; // default
-    if (port_sep && (!path_sep || port_sep < path_sep)) {
-        result.port = atoi(port_sep + 1);
-        result.rqh_host.appendf(":{}", result.port);
-    }
-
-    // ❓ 4. extract extension (path)
-    if (path_sep) {
-        const char* path_start = path_sep + 1;
-        const char* path_end = query_sep ? query_sep : host + strlen(host);
-        result.extension.copy_from(path_start, path_end - path_start);
-    }
-
-    // ❓ 5. extract query string
-    if (query_sep) { result.query_string.assign(query_sep + 1); }
-
+    if (parts.explicit_port) result.rqh_host.appendf(":{}", result.port);
+    if (parts.has_path) result.extension.copy_from(parts.path, parts.path_len);
+    if (parts.has_query) result.query_string.assign(parts.query);
     return result;
 }
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
@@ -1061,23 +1026,19 @@ bool Audio::connecttohost(const char* host, const char* user, const char* pwd) {
 
     if (!c_host.valid()) {
         AUDIO_LOG_ERROR("Hostaddress is empty");
-        stopSong();
         return false;
     }
 
     c_host.trim();
 
-    if (c_host.strlen() < 8) {
-        AUDIO_LOG_ERROR("Hostaddress is too short");
-        stopSong();
-        return false;
+    // Reject before setDefaults()/stopSong()/connect. Empty and overlong stay on the old logs.
+    switch (audiolib::classifyConnectHost(c_host.get())) {
+        case audiolib::ConnectHostGate::Empty: AUDIO_LOG_ERROR("Hostaddress is empty"); return false;
+        case audiolib::ConnectHostGate::TooShort: AUDIO_LOG_ERROR("Hostaddress is too short"); return false;
+        case audiolib::ConnectHostGate::TooLong: AUDIO_LOG_ERROR("Hostaddress is too long"); return false; // max length in Chrome DevTools
+        case audiolib::ConnectHostGate::Malformed: AUDIO_LOG_ERROR("Invalid URL: {}", c_host.c_get()); return false;
+        case audiolib::ConnectHostGate::Accept: break;
     }
-
-    if (c_host.strlen() > 2048) {
-        AUDIO_LOG_ERROR("Hostaddress is too long");
-        stopSong();
-        return false;
-    } // max length in Chrome DevTools
 
     const char* user_agent = "Mozilla/5.0 (X11; Linux x86_64) Chrome/146.0.0.0 Safari/537.36";
 
@@ -1194,7 +1155,6 @@ bool Audio::httpPrint(const char* host) {
 
     if (!c_host.valid() || !c_host.strlen()) { // nullptr or empty string
         AUDIO_LOG_ERROR("Hostaddress is empty");
-        stopSong();
         return false;
     }
 
@@ -1208,6 +1168,11 @@ bool Audio::httpPrint(const char* host) {
     ps_ptr<char> cur_hwoe;     // m_currenthost without extension
 
     c_host.trim();
+    audiolib::ParsedHttpUrl parsedHost;
+    if (!audiolib::tryParseHttpEndpoint(c_host.get(), &parsedHost)) {
+        AUDIO_LOG_ERROR("Invalid URL: {}", c_host.c_get());
+        return false;
+    }
     auto dismantledHost = dismantle_host(c_host.get());
 
     //  https://edge.live.mp3.mdn.newmedia.nacamar.net:8000/ps-charivariwb/livestream.mp3;?user=ps-charivariwb;&pwd=ps-charivariwb-------
@@ -1333,6 +1298,11 @@ bool Audio::httpRange(uint32_t seek, uint32_t length) {
 
     c_host.clone_from(m_currentHost);
     c_host.trim();
+    audiolib::ParsedHttpUrl parsedHost;
+    if (!audiolib::tryParseHttpEndpoint(c_host.get(), &parsedHost)) {
+        AUDIO_LOG_ERROR("Invalid URL: {}", c_host.c_get());
+        return false;
+    }
     auto dismantledHost = dismantle_host(c_host.get());
 
     //  https://edge.live.mp3.mdn.newmedia.nacamar.net:8000/ps-charivariwb/livestream.mp3;?user=ps-charivariwb;&pwd=ps-charivariwb-------
@@ -3982,6 +3952,11 @@ void Audio::loop() {
                 if (readPlayListData())
                     break;
                 else { // readPlayListData == false means connect to m3u8 URL
+                    audiolib::ParsedHttpUrl parts;
+                    if (!audiolib::tryParseHttpEndpoint(m_m3u8_host.get(), &parts)) {
+                        AUDIO_LOG_ERROR("Invalid URL: {}", m_m3u8_host.c_get());
+                        break;
+                    }
                     httpPrint(m_m3u8_host.get());
                     m_dataMode = HTTP_RESPONSE_HEADER; // we have a new playlist now
                     break;
@@ -3989,6 +3964,11 @@ void Audio::loop() {
             case AUDIO_PLAYLISTDATA:
                 host = parsePlaylist_M3U8();
                 if (host.valid()) { // host contains the next playlist URL
+                    audiolib::ParsedHttpUrl parts;
+                    if (!audiolib::tryParseHttpEndpoint(host.get(), &parts)) {
+                        AUDIO_LOG_ERROR("Invalid URL: {}", host.c_get());
+                        break;
+                    }
                     httpPrint(host.get());
                     m_dataMode = HTTP_RESPONSE_HEADER;
                 } else { // host == NULL means connect to m3u8 URL
@@ -3997,6 +3977,11 @@ void Audio::loop() {
                         break;
                     }
                     if (m_f_stream) m_lVar.no_host_timer = millis() + 10000;
+                    audiolib::ParsedHttpUrl parts;
+                    if (!audiolib::tryParseHttpEndpoint(m_m3u8_host.get(), &parts)) {
+                        AUDIO_LOG_ERROR("Invalid URL: {}", m_m3u8_host.c_get());
+                        break;
+                    }
                     httpPrint(m_m3u8_host.get());
                     m_dataMode = HTTP_RESPONSE_HEADER; // we have a new playlist now
                 }
@@ -5517,6 +5502,11 @@ bool Audio::parseHttpResponseHeader() { // this is the response to a GET / reque
             case HeaderResult::ContentTypeSeen: ct_seen = true; break;
             case HeaderResult::Redirect:
                 if (redirectUrl.starts_with("http")) {
+                    audiolib::ParsedHttpUrl redirectParts;
+                    if (!audiolib::tryParseHttpEndpoint(redirectUrl.c_get(), &redirectParts)) {
+                        AUDIO_LOG_ERROR("Invalid URL: {}", redirectUrl.c_get());
+                        break;
+                    }
                     m_client->stop();
                     httpPrint(redirectUrl.c_get());
                     return true;
