@@ -116,10 +116,83 @@ std::vector<Step> drive(VorbisDecoder& dec, std::vector<uint8_t>& page, int32_t*
     return steps;
 }
 
+std::vector<uint8_t> valid_setup_page() {
+    // AF-2.3 no longer enters page 4 after a rejected setup. The old 32-byte
+    // placeholder was rejected and only reached the audio page because of that
+    // bug. This is the same one-book setup the AF-2.3 fixture accepts.
+    struct Bits {
+        std::vector<uint8_t> bytes;
+        int filled = 0;
+        void put(uint32_t value, int n) {
+            for (int i = 0; i < n; ++i) {
+                if (bytes.empty() || filled == 8) {
+                    bytes.push_back(0);
+                    filled = 0;
+                }
+                if (value & 1u) { bytes.back() = static_cast<uint8_t>(bytes.back() | (1u << filled)); }
+                value >>= 1;
+                ++filled;
+            }
+        }
+    } w;
+    w.put(0, 8);
+    w.put(0x564342, 24);
+    w.put(1, 16);
+    w.put(7, 24);
+    w.put(0, 1);
+    w.put(1, 1);
+    w.put(1, 1);
+    w.put(0, 5);
+    for (int i = 0; i < 6; ++i) { w.put(0, 1); }
+    w.put(0, 4);
+    w.put(0, 6);
+    w.put(0, 16);
+    w.put(0, 6);
+    w.put(0, 16);
+    w.put(1, 8);
+    w.put(1, 16);
+    w.put(1, 16);
+    w.put(0, 6);
+    w.put(0, 8);
+    w.put(0, 4);
+    w.put(0, 8);
+    w.put(0, 6);
+    w.put(0, 16);
+    w.put(0, 24);
+    w.put(0, 24);
+    w.put(0, 24);
+    w.put(0, 6);
+    w.put(0, 8);
+    w.put(0, 3);
+    w.put(0, 1);
+    w.put(0, 6);
+    w.put(0, 16);
+    w.put(1, 1);
+    w.put(0, 4);
+    w.put(0, 1);
+    w.put(0, 2);
+    w.put(0, 8);
+    w.put(0, 8);
+    w.put(0, 8);
+    w.put(0, 6);
+    w.put(0, 1);
+    w.put(0, 16);
+    w.put(0, 16);
+    w.put(0, 8);
+    w.put(1, 1);
+    std::vector<uint8_t> payload(7 + w.bytes.size(), 0);
+    payload[0] = 5;
+    std::memcpy(payload.data() + 1, "vorbis", 6);
+    std::memcpy(payload.data() + 7, w.bytes.data(), w.bytes.size());
+    std::vector<uint8_t> page;
+    append_page(page, 0, {static_cast<uint8_t>(payload.size())}, payload);
+    return page;
+}
+
 void reach_audio(VorbisDecoder& dec, int32_t* pcm) {
     std::vector<uint8_t> ident = header_page(1, 30);
     std::vector<uint8_t> comment = header_page(3, 32);
-    std::vector<uint8_t> setup = header_page(5, 32);
+    std::vector<uint8_t> setup = valid_setup_page();
     drive(dec, ident, pcm, 2);
     drive(dec, comment, pcm, 2);
     drive(dec, setup, pcm, 2);

@@ -411,6 +411,9 @@ class VorbisDecoder : public Decoder {
     uint32_t little_endian(uint8_t* data);
 
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+// Test probe. Production builds never define this type; the declaration does not change behavior.
+    friend struct VorbisSetupProbe;
+
 // Macro for comfortable calls
 #define VORBIS_LOG_ERROR(fmt, ...)   Audio::AUDIO_LOG_IMPL(1, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
 #define VORBIS_LOG_WARN(fmt, ...)    Audio::AUDIO_LOG_IMPL(2, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
