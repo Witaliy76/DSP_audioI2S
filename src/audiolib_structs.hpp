@@ -207,7 +207,9 @@ typedef struct _tspp { // used in ts_parsePacket
 } tspp_t;
 
 struct pwst_t { // used in processWebStream
-    uint16_t maxFrameSize;
+    uint16_t maxFrameSize = 0;
+    uint32_t startupSince = 0;
+    bool     startupWatch = false;
     uint32_t chunkSize = 0;
     bool     f_skipCRLF = false;
     uint32_t availableBytes;
@@ -239,6 +241,8 @@ struct pwf_t { // used in processWebFile
     bool     f_clientIsConnected;
     uint32_t ctime;
     uint32_t timeout;
+    uint32_t postHeaderSince = 0;
+    bool     postHeaderWatch = false;
     uint32_t availableBytes;
     int32_t  bytesAddedToBuffer;
 };
@@ -258,6 +262,7 @@ struct sbyt_t { // used in sendBytes
     int         nextSync = 0;
     uint8_t     isPS = 0;
     const char* opus_mode = nullptr;
+    bool        flacSplitOutput = false;
 };
 
 struct rmet_t {          // used in readMetadata
