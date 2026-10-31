@@ -17,7 +17,8 @@ char audioI2SVers[] = "\
 
 #include "Audio.h"
 #include "audio_url.h"
-#include "flac_startup.h"
+#include "codec_ownership.h"
+#include "decoder_lifecycle.h"
 #include "aac_decoder/aac_decoder.h"
 #include "flac_decoder/flac_decoder.h"
 #include "mp3_decoder/mp3_decoder.h"
@@ -734,12 +735,11 @@ Audio::Audio(uint8_t i2sPort) {
 }
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
 Audio::~Audio() {
-    stopSong();
-    setDefaults();
-
+    // Stop the audio task before touching the decoder or deleting the mutexes.
+    stopAudioTask();
+    stopSongWithOwnership(true);
     i2s_channel_disable(m_i2s_tx_handle);
     i2s_del_channel(m_i2s_tx_handle);
-    stopAudioTask();
     dsps_fft2r_deinit_fc32();
     vSemaphoreDelete(mutex_audioTask);
     vSemaphoreDelete(mutex_audioTaskIsDecoding);
@@ -797,8 +797,10 @@ void Audio::zeroI2Sbuff() {
     i2s_channel_preload_data(m_i2s_tx_handle, buff, 2, &bytes_loaded);
 }
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
-void Audio::setDefaults() {
-    stopSong();
+bool Audio::setDefaults() {
+    if (!stopSongWithOwnership(true)) return false;
+    // Invalidate a NEED_RESTART that was published for the previous stream.
+    m_streamEpoch.fetch_add(1, std::memory_order_acq_rel);
     initInBuff(); // initialize InputBuffer if not already done
 
     InBuff.reset();
@@ -839,7 +841,6 @@ void Audio::setDefaults() {
     m_f_firstCall = true;             // InitSequence for processWebstream and processLocalFile
     m_pplM3U8.firstCall = true;       // InitSequence for parsePlaylist_M3U8
     m_f_firstPlayCall = true;         // InitSequence for playAudioData
-    m_sbyt.flacSplitOutput = false;
     m_f_firstChunkCall = true;        // InitSequence for playChunk
     m_f_firstCacheSamplesCall = true; // InitSequence for cacheSamples
     m_f_first_vu_call = true;         // InitSequence for calculateVUlevel
@@ -865,6 +866,7 @@ void Audio::setDefaults() {
     m_f_alternative_user_agent = false;
 
     m_codec = CODEC_NONE;
+    clearCodecStage();
     m_dataMode = AUDIO_NONE;
     m_streamType = ST_NONE;
     m_playlistFormat = FORMAT_NONE;
@@ -895,6 +897,7 @@ void Audio::setDefaults() {
     m_M4A_sampleRate = 0;
     m_lastGranulePosition = 0;
     m_validSamples = 0;
+    return true;
 }
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
 void Audio::setConnectionTimeout(uint16_t timeout_ms, uint16_t timeout_ms_ssl) {
@@ -943,7 +946,7 @@ bool Audio::openai_speech(const char* api_key, const char* model, const char* in
         return in;
     };
 
-    setDefaults();
+    if (!setDefaults()) return false;
     m_f_ssl = true;
 
     ps_ptr<char> input_clean = clean(input);
@@ -1085,7 +1088,7 @@ bool Audio::connecttohost(const char* host, const char* user, const char* pwd) {
         b64encode((const char*)toEncode.get(), toEncode.strlen(), authorization.get());
     }
 
-    setDefaults();
+    if (!setDefaults()) return false;
 
     rqh.assignf("GET /{}", path);
     rqh.append(" HTTP/1.1\r\n");
@@ -1392,7 +1395,7 @@ bool Audio::connecttoFS(fs::FS& fs, const char* path, int32_t fileStartTime) {
         AUDIO_LOG_ERROR("No file extension found");
         goto exit;
     } // guard
-    setDefaults(); // free buffers an set defaults
+    if (!setDefaults()) return false; // free buffers and set defaults
 
     if (c_path.ends_with_icase(".mp3")) m_codec = CODEC_MP3;
     if (c_path.ends_with_icase(".m4a")) m_codec = CODEC_M4A;
@@ -1429,7 +1432,7 @@ exit:
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
 bool Audio::connecttospeech(const char* speech, const char* lang) {
 
-    setDefaults();
+    if (!setDefaults()) return false;
     char host[] = "translate.google.com.vn";
     char path[] = "/translate_tts";
 
@@ -3624,35 +3627,110 @@ size_t Audio::process_m3u8_ID3_Header(uint8_t* packet) {
 }
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
 uint32_t Audio::stopSong() {
-    m_f_lockInBuffer = true; // wait for the decoding to finish
-    uint8_t  maxWait = 0;
-    uint32_t currTime = getAudioCurrentTime();
-
-    bool pdTrue = xSemaphoreTake(mutex_audioTaskIsDecoding, 1 * configTICK_RATE_HZ); // wait for audioTask is ready
-    {
-        if (m_f_running) {
-            m_audio_items.mute = true;
-            m_f_running = false;
-            if (m_client->connected()) {
-                if (isStream()) { info(*this, evt_info, "Closing web stream \"{}\"", m_lastHost.c_get()); }
-                if (isFile()) { info(*this, evt_info, "Closing web file \"{}\"", m_lastHost.c_get()); }
-                m_client->stop();
-            }
-            if (m_audiofile) {
-                info(*this, evt_info, "Closing audio file \"{}\"", m_audiofile.name());
-                m_audiofile.close();
-            }
-        }
-        m_dataMode = AUDIO_NONE;
-        m_sbyt.flacSplitOutput = false;
-        m_streamType = ST_NONE;
-        m_playlistFormat = FORMAT_NONE;
-        destroy_decoder();
-    }
-    xSemaphoreGive(mutex_audioTaskIsDecoding);
-    if (!pdTRUE) AUDIO_LOG_WARN("was unable to obtain the semaphore");
-    m_f_lockInBuffer = false;
+    const uint32_t currTime = getAudioCurrentTime();
+    if (stopSongWithOwnership(true)) m_f_lockInBuffer = false;
     return currTime;
+}
+
+bool Audio::stopSongWithOwnership(bool clear_pending) {
+    m_f_lockInBuffer = true; // keep playAudioData out until the caller clears it
+    const bool took = xSemaphoreTake(mutex_audioTaskIsDecoding, 1 * configTICK_RATE_HZ) == pdTRUE;
+    const audiolib::MutexStop decision = audiolib::mutexStop(took);
+    if (!decision.proceed) {
+        audiolib::requestDecoderCtrl(m_decoderCtrl, decision.publish);
+        AUDIO_LOG_WARN("was unable to obtain the semaphore");
+        return false;
+    }
+    // User/public stop consumes pending commands. A service claim already set
+    // the slot to None; clearing here would drop a Stop published after that claim.
+    if (clear_pending) m_decoderCtrl.store(static_cast<uint8_t>(audiolib::DecoderCtrl::None), std::memory_order_release);
+    stopSongLocked();
+    if (decision.give) xSemaphoreGive(mutex_audioTaskIsDecoding);
+    return true;
+}
+
+void Audio::stopSongLocked() {
+    if (m_f_running) {
+        m_audio_items.mute = true;
+        m_f_running = false;
+        if (m_client->connected()) {
+            if (isStream()) { info(*this, evt_info, "Closing web stream \"{}\"", m_lastHost.c_get()); }
+            if (isFile()) { info(*this, evt_info, "Closing web file \"{}\"", m_lastHost.c_get()); }
+            m_client->stop();
+        }
+        if (m_audiofile) {
+            info(*this, evt_info, "Closing audio file \"{}\"", m_audiofile.name());
+            m_audiofile.close();
+        }
+    }
+    m_dataMode = AUDIO_NONE;
+    m_streamType = ST_NONE;
+    m_playlistFormat = FORMAT_NONE;
+    destroy_decoder();
+    clearCodecStage();
+}
+
+void Audio::clearCodecStage() {
+    m_stagedCodec = CODEC_NONE;
+    m_f_stagedOgg = false;
+    m_f_ctIsPlaylist = false;
+    m_f_ctReject = false;
+}
+
+void Audio::applyStagedCodec() {
+    if (m_stagedCodec == CODEC_NONE) return;
+    m_codec = audiolib::applyStagedCodec(m_stagedCodec, &m_stagedCodec);
+    m_f_ogg = m_f_stagedOgg;
+    m_f_stagedOgg = false;
+}
+
+bool Audio::releaseDecoderOwned() {
+    // Same mutex ownership as stopSongWithOwnership; does not close the client.
+    // Used when HTTP Content-Type requires a different decoder for the open body.
+    // Leaves m_f_lockInBuffer set; the caller clears it after applyStagedCodec (or stop).
+    m_f_lockInBuffer = true;
+    const bool took = xSemaphoreTake(mutex_audioTaskIsDecoding, 1 * configTICK_RATE_HZ) == pdTRUE;
+    const audiolib::MutexStop decision = audiolib::mutexStop(took);
+    if (!decision.proceed) {
+        audiolib::requestDecoderCtrl(m_decoderCtrl, decision.publish);
+        AUDIO_LOG_WARN("was unable to obtain the semaphore");
+        return false;
+    }
+    destroy_decoder();
+    m_f_stream = false;
+    m_f_playing = false;
+    m_f_decode_ready = false;
+    m_f_firstCall = true;
+    m_controlCounter = 0;
+    InBuff.reset();
+    if (decision.give) xSemaphoreGive(mutex_audioTaskIsDecoding);
+    return true;
+}
+
+void Audio::requestReconnect() {
+    m_reconnectEpoch.store(m_streamEpoch.load(std::memory_order_acquire), std::memory_order_release);
+    audiolib::requestDecoderCtrl(m_decoderCtrl, audiolib::DecoderCtrl::Reconnect);
+}
+
+void Audio::serviceDecoderCtrl() {
+    uint8_t claimed = 0;
+    if (!audiolib::claimDecoderCtrl(m_decoderCtrl, &claimed)) return;
+
+    if (!stopSongWithOwnership(false)) {
+        // Failed take already published Stop. Restore must raise, never demote.
+        audiolib::restoreDecoderCtrl(m_decoderCtrl, claimed);
+        return;
+    }
+
+    const uint32_t published_epoch = m_reconnectEpoch.load(std::memory_order_acquire);
+    const uint32_t stream_epoch = m_streamEpoch.load(std::memory_order_acquire);
+    const bool     do_reconnect = audiolib::reconnectAfterOwnedStop(m_decoderCtrl, claimed) &&
+                              audiolib::reconnectEpochCurrent(published_epoch, stream_epoch) && m_lastHost.valid();
+    if (do_reconnect) {
+        if (!connecttohost(m_lastHost.get()) && !audiolib::decoderCtrlPending(m_decoderCtrl.load(std::memory_order_acquire))) m_f_lockInBuffer = false;
+        return;
+    }
+    m_f_lockInBuffer = false;
 }
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
 bool Audio::pauseResume() {
@@ -3897,6 +3975,7 @@ void Audio::playChunk() {
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
 void Audio::loop() {
 
+    serviceDecoderCtrl();
     get_info();
     if (!m_f_running) return;
 
@@ -4760,9 +4839,6 @@ void Audio::processWebStream() {
         m_pwst.chunkSize = 0;
         m_metacount = m_metaint;
         m_f_allDataReceived = false;
-        m_pwst.maxFrameSize = 0;
-        m_pwst.startupWatch = false;
-        m_pwst.startupSince = 0;
         readMetadata(0, &readedBytes, true);
         getChunkSize(0, true);
         m_audioFilePosition = 0;
@@ -4807,10 +4883,9 @@ void Audio::processWebStream() {
     if (m_metaint) m_pwst.writeSpace = min(m_pwst.writeSpace, m_metacount);
 
     // buffer fill routine - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-    int32_t bytesAddedToBuffer = 0;
     if (m_pwst.availableBytes) {
         m_pwst.writeSpace = min(m_pwst.writeSpace, (uint32_t)InBuff.writeSpace());
-        bytesAddedToBuffer = audioFileRead(InBuff.getWritePtr(), min(m_pwst.writeSpace, (uint32_t)UINT16_MAX));
+        int32_t bytesAddedToBuffer = audioFileRead(InBuff.getWritePtr(), min(m_pwst.writeSpace, (uint32_t)UINT16_MAX));
 
         if (bytesAddedToBuffer > 0) {
             m_pwst.writeSpace -= bytesAddedToBuffer;
@@ -4835,27 +4910,10 @@ void Audio::processWebStream() {
             return;
     }
 
-    if (!m_pwst.startupWatch || bytesAddedToBuffer > 0) {
-        m_pwst.startupSince = millis();
-        m_pwst.startupWatch = true;
-    }
-    size_t flacUnit = 0;
-    if (m_decoder && m_codec == CODEC_FLAC) {
-        const size_t readable = InBuff.readSpace();
-        if (readable > 0) flacUnit = audiolib::flacContainedUnit(InBuff.getReadPtr(), readable);
-    }
-    // Capacity (maxFrameSize) stays the large-frame fallback. A bounded FLAC
-    // frame or Ogg page may open the stream earlier. A zero maxFrameSize is
-    // not a threshold.
-    const bool startupReady = audiolib::webStreamStartupReady(m_decoder != nullptr, InBuff.bufferFilled(), m_pwst.maxFrameSize, m_f_allDataReceived, flacUnit);
-    if (startupReady && !m_f_stream) {
+    // start audio decoding - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    if (((InBuff.bufferFilled() > m_pwst.maxFrameSize) || (m_f_allDataReceived)) && !m_f_stream) { // waiting for buffer filled
         info(*this, evt_info, "stream ready");
-        m_f_stream = true;
-    } else if (audiolib::startupStallApplies(m_codec == CODEC_FLAC, m_f_stream, m_f_allDataReceived,
-                                            audiolib::startupStalled(millis(), m_pwst.startupSince, m_pwst.startupWatch, bytesAddedToBuffer > 0, audiolib::kStartupStallMs))) {
-        AUDIO_LOG_ERROR("startup prebuffer stalled");
-        stopSong();
-        return;
+        m_f_stream = true; // ready to play the audio data
     }
 
     if (m_f_eof) {
@@ -4890,8 +4948,6 @@ void Audio::processWebFile() {
         m_audioDataStart = 0;
         m_f_allDataReceived = false;
         m_pwf.timeout = 8000; // ms
-        m_pwf.postHeaderWatch = false;
-        m_pwf.postHeaderSince = 0;
         if (!initializeDecoder()) return;
         m_pwf.maxFrameSize = InBuff.getMaxBlockSize(); // every frame is not bigger
     }
@@ -4916,8 +4972,6 @@ void Audio::processWebFile() {
         if (!initializeDecoder()) return;
     }
 
-    if (m_codec == CODEC_FLAC && m_audioFileSize && m_audioFilePosition >= m_audioFileSize) m_f_allDataReceived = true;
-
     if (!m_f_stream) {
         if (m_controlCounter != 100) {
             if (m_f_ogg) { m_controlCounter = 100; }
@@ -4934,26 +4988,12 @@ void Audio::processWebFile() {
                 if (!m_audioDataSize) m_audioDataSize = m_audioFileSize;
             }
             return;
-        } else if (m_resumeFilePos == -1) {
-            if (!m_pwf.postHeaderWatch || m_pwf.bytesAddedToBuffer > 0) {
-                m_pwf.postHeaderSince = millis();
-                m_pwf.postHeaderWatch = true;
-            }
-            size_t flacUnit = 0;
-            if (m_codec == CODEC_FLAC) {
-                const size_t readable = InBuff.readSpace();
-                if (readable > 0) flacUnit = audiolib::flacContainedUnit(InBuff.getReadPtr(), readable);
-            }
-            const bool flacFile = (m_codec == CODEC_FLAC);
-            const bool startupReady = audiolib::webFileStartupReady(InBuff.bufferFilled(), InBuff.getMaxBlockSize(), flacFile && m_f_allDataReceived, flacUnit);
-            if (startupReady) {
-                m_f_stream = true;
-                info(*this, evt_info, "stream ready");
-            } else if (audiolib::startupStallApplies(flacFile, m_f_stream, m_f_allDataReceived,
-                                                     audiolib::startupStalled(millis(), m_pwf.postHeaderSince, m_pwf.postHeaderWatch, m_pwf.bytesAddedToBuffer > 0, audiolib::kStartupStallMs))) {
-                AUDIO_LOG_ERROR("startup prebuffer stalled");
-                stopSong();
-                return;
+        } else {
+            if (m_resumeFilePos == -1) {
+                if (InBuff.bufferFilled() > 2 * InBuff.getMaxBlockSize()) {
+                    m_f_stream = true;
+                    info(*this, evt_info, "stream ready");
+                }
             }
         }
     }
@@ -5289,7 +5329,17 @@ void Audio::playAudioData() {
         cacheSamples();
         return;
     }
-    //--------------------------------------------------------------------------------
+    if (!isFile() && !isStream()) return;
+    if (audiolib::decoderCtrlPending(m_decoderCtrl.load(std::memory_order_acquire))) return;
+
+    const bool took = xSemaphoreTake(mutex_audioTaskIsDecoding, 1 * configTICK_RATE_HZ) == pdTRUE;
+    const audiolib::DecodeGate gate = audiolib::decodeGate(took, audiolib::decoderCtrlPending(m_decoderCtrl.load(std::memory_order_acquire)));
+    if (!gate.enter) {
+        if (gate.give) xSemaphoreGive(mutex_audioTaskIsDecoding);
+        else AUDIO_LOG_WARN("was unable to obtain the semaphore");
+        return;
+    }
+
     m_pad.count = 0;
     m_pad.bytesToDecode = InBuff.readSpace();
     m_pad.bytesDecoded = 0;
@@ -5301,23 +5351,10 @@ void Audio::playAudioData() {
         m_pad.oldAudioDataSize = 0;
         m_bytesNotConsumed = 0;
         m_pad.lastFrames = false;
-        m_sbyt.flacSplitOutput = false;
     }
-    //--------------------------------------------------------------------------------
 
-    if (!isFile() && !isStream()) return;
-
-    xSemaphoreTake(mutex_audioTaskIsDecoding, 1 * configTICK_RATE_HZ);
     {
         m_pad.bytesDecoded = 0;
-        if (m_codec != CODEC_FLAC) m_sbyt.flacSplitOutput = false;
-        auto flacBytesReady = [&](size_t readable) -> bool {
-            if (m_sbyt.flacSplitOutput && readable > 0) return true;
-            size_t unit = 0;
-            if (m_codec == CODEC_FLAC && readable > 0) unit = audiolib::flacContainedUnit(InBuff.getReadPtr(), readable);
-            const size_t need = audiolib::decodeReadMinimum(readable, InBuff.getMaxBlockSize(), unit);
-            return readable >= need;
-        };
         if (isFile()) {
             if (!m_audioDataSize) goto exit; // no data to decode if filesize is 0
             if (m_audioDataSize - m_audioDataReadPtr == 128) {
@@ -5338,7 +5375,7 @@ void Audio::playAudioData() {
                 m_pad.bytesDecoded = sendBytes(InBuff.getReadPtr(), m_pad.bytesToDecode);
             } else {
                 m_pad.bytesToDecode = InBuff.readSpace();
-                if (m_pad.bytesToDecode > 0 && flacBytesReady(static_cast<size_t>(m_pad.bytesToDecode))) { m_pad.bytesDecoded = sendBytes(InBuff.getReadPtr(), m_pad.bytesToDecode); }
+                if (m_pad.bytesToDecode >= InBuff.getMaxBlockSize()) { m_pad.bytesDecoded = sendBytes(InBuff.getReadPtr(), m_pad.bytesToDecode); }
             }
         }
 
@@ -5359,7 +5396,7 @@ void Audio::playAudioData() {
                 m_pad.bytesDecoded = sendBytes(InBuff.getReadPtr(), m_pad.bytesToDecode);
             } else {
                 m_pad.bytesToDecode = InBuff.readSpace();
-                if (m_pad.bytesToDecode > 0 && flacBytesReady(static_cast<size_t>(m_pad.bytesToDecode))) { m_pad.bytesDecoded = sendBytes(InBuff.getReadPtr(), m_pad.bytesToDecode); }
+                if (m_pad.bytesToDecode >= InBuff.getMaxBlockSize()) { m_pad.bytesDecoded = sendBytes(InBuff.getReadPtr(), m_pad.bytesToDecode); }
             }
         }
 
@@ -5528,6 +5565,8 @@ bool Audio::parseHttpResponseHeader() { // this is the response to a GET / reque
     m_metaint = 0; // no metaint yet
 
     m_phreh.reset();
+    m_f_ctIsPlaylist = false;
+    m_f_ctReject = false;
     bool         ct_seen = false;
     int          pos = 0;
     ps_ptr<char> name;
@@ -5589,10 +5628,29 @@ lastToDo:
 
     if (ct_seen && m_playlistFormat == FORMAT_M3U8 && !m_m3u8_host.valid()) { m_m3u8_host = m_lastHost; }
 
-    if (m_codec != CODEC_NONE) {
+    const audiolib::HttpBodyKind body =
+        audiolib::classifyHttpBody(m_f_ctIsPlaylist, m_f_ctReject, m_codec, m_stagedCodec, m_playlistFormat);
+    const bool                 need_release = audiolib::codecChangeRequiresRelease(m_decoder != nullptr, m_codec, m_stagedCodec);
+    bool                       release_ok = true;
+    if (body == audiolib::HttpBodyKind::Audio && need_release) {
+        release_ok = releaseDecoderOwned();
+        if (release_ok) {
+            applyStagedCodec();
+            m_f_lockInBuffer = false;
+        } else {
+            AUDIO_LOG_WARN("codec change aborted; decoder still owned");
+        }
+    } else if (body == audiolib::HttpBodyKind::Audio && !m_decoder && m_stagedCodec != CODEC_NONE) {
+        applyStagedCodec();
+    }
+
+    const audiolib::HttpHeaderRoute route = audiolib::routeHttpResponseBody(body, need_release, release_ok);
+    if (route == audiolib::HttpHeaderRoute::AbortStop) {
+        goto exit;
+    } else if (route == audiolib::HttpHeaderRoute::AudioData) {
         m_dataMode = AUDIO_DATA; // Expecting data now
-    } else if (m_playlistFormat != FORMAT_NONE) {
-        m_dataMode = AUDIO_PLAYLISTINIT; // playlist expected
+    } else if (route == audiolib::HttpHeaderRoute::PlaylistInit) {
+        m_dataMode = AUDIO_PLAYLISTINIT; // playlist expected — not AUDIO_DATA, even with live m_codec
         // AUDIO_LOG_INFO("now parse playlist");
     } else {
         if (m_content_type == "text/html") { // SHOUTcast http://server1.chilltrax.com:9000/
@@ -5617,6 +5675,11 @@ lastToDo:
 bool Audio::parseHttpRangeHeader() { // this is the response to a Range request
 
     if (m_dataMode != HTTP_RANGE_HEADER) return false;
+
+    // Seek/resume must keep the live decoder. Snapshot before Content-Type side effects.
+    const uint8_t codec_before = m_codec;
+    const uint8_t playlist_before = m_playlistFormat;
+    const bool    ogg_before = m_f_ogg;
 
     ps_ptr<char> name;
     ps_ptr<char> value;
@@ -5647,16 +5710,26 @@ bool Audio::parseHttpRangeHeader() { // this is the response to a Range request
 exit:
     return false;
 lastToDo:
+    // parseHeaderLine may have called parseContentType. Range must not stage a
+    // codec change, rewrite playlist format, or leave CT classification sticky.
+    audiolib::freezeCodecOwnershipForRange(codec_before, playlist_before, ogg_before, &m_codec, &m_stagedCodec,
+                                           &m_playlistFormat, &m_f_ogg, &m_f_stagedOgg, &m_f_ctIsPlaylist, &m_f_ctReject);
     m_dataMode = AUDIO_DATA;
     return true;
 }
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
 bool Audio::initializeDecoder() {
+    if (!m_decoder && m_stagedCodec != CODEC_NONE) applyStagedCodec();
+
     if (m_decoder) {
-        AUDIO_LOG_WARN("stopSong first");
+        // Live object must stay consistent with m_codec. A different staged
+        // codec is not applied here; releaseDecoderOwned / stop must run first.
+        if (!audiolib::initializeDecoderAllowsLive(true, m_codec, m_stagedCodec)) {
+            AUDIO_LOG_WARN("codec change pending; release decoder first");
+            return false;
+        }
         return true;
     }
-    m_sbyt.flacSplitOutput = false;
     m_codec = determineCodec(m_codec); // OGG cn be VORBIS, FLAC or OPUS, contentType must not always be correct
 
     const char* type = nullptr;
@@ -5759,7 +5832,6 @@ bool Audio::parseContentType(ps_ptr<char> ct) {
 
     ct.trim();
 
-    m_codec = CODEC_NONE;
     int ct_val = CT_NONE;
 
     // Search in the Lookup table
@@ -5784,39 +5856,93 @@ bool Audio::parseContentType(ps_ptr<char> ct) {
         return false;
     }
 
-    // allocation of m_codec and m_playlist format
+    // Resolve desired codec / playlist without writing active m_codec yet.
+    uint8_t desired = CODEC_NONE;
+    uint8_t pls = FORMAT_NONE;
+    bool    ogg = false;
+    bool    is_playlist = false;
+
     switch (ct_val) {
-        case CT_MP3: m_codec = CODEC_MP3; break;
-        case CT_AAC: m_codec = CODEC_AAC; break;
-        case CT_M4A: m_codec = CODEC_M4A; break;
-        case CT_FLAC: m_codec = CODEC_FLAC; break;
+        case CT_MP3: desired = CODEC_MP3; break;
+        case CT_AAC: desired = CODEC_AAC; break;
+        case CT_M4A: desired = CODEC_M4A; break;
+        case CT_FLAC: desired = CODEC_FLAC; break;
         case CT_OPUS:
-            m_codec = CODEC_OPUS;
-            m_f_ogg = true;
+            desired = CODEC_OPUS;
+            ogg = true;
             break;
         case CT_VORBIS:
-            m_codec = CODEC_VORBIS;
-            m_f_ogg = true;
+            desired = CODEC_VORBIS;
+            ogg = true;
             break;
-        case CT_WAV: m_codec = CODEC_WAV; break;
+        case CT_WAV: desired = CODEC_WAV; break;
         case CT_OGG:
-            m_codec = CODEC_OGG;
-            m_f_ogg = true;
+            desired = CODEC_OGG;
+            ogg = true;
             break;
-        case CT_PLS: m_playlistFormat = FORMAT_PLS; break;
-        case CT_M3U: m_playlistFormat = FORMAT_M3U; break;
-        case CT_ASX: m_playlistFormat = FORMAT_ASX; break;
-        case CT_M3U8: m_playlistFormat = FORMAT_M3U8; break;
+        case CT_PLS:
+            pls = FORMAT_PLS;
+            is_playlist = true;
+            break;
+        case CT_M3U:
+            pls = FORMAT_M3U;
+            is_playlist = true;
+            break;
+        case CT_ASX:
+            pls = FORMAT_ASX;
+            is_playlist = true;
+            break;
+        case CT_M3U8:
+            pls = FORMAT_M3U8;
+            is_playlist = true;
+            break;
         case CT_TXT:
-            if (m_expectedCodec == CODEC_AAC) m_codec = CODEC_AAC;
-            if (m_expectedCodec == CODEC_MP3) m_codec = CODEC_MP3;
-            if (m_expectedCodec == CODEC_FLAC) m_codec = CODEC_FLAC;
-            if (m_expectedPlsFmt == FORMAT_ASX) m_playlistFormat = FORMAT_ASX;
-            if (m_expectedPlsFmt == FORMAT_M3U) m_playlistFormat = FORMAT_M3U;
-            if (m_expectedPlsFmt == FORMAT_M3U8) m_playlistFormat = FORMAT_M3U8;
-            if (m_expectedPlsFmt == FORMAT_PLS) m_playlistFormat = FORMAT_PLS;
+            if (m_expectedCodec == CODEC_AAC) desired = CODEC_AAC;
+            if (m_expectedCodec == CODEC_MP3) desired = CODEC_MP3;
+            if (m_expectedCodec == CODEC_FLAC) desired = CODEC_FLAC;
+            if (m_expectedPlsFmt == FORMAT_ASX) {
+                pls = FORMAT_ASX;
+                is_playlist = true;
+            }
+            if (m_expectedPlsFmt == FORMAT_M3U) {
+                pls = FORMAT_M3U;
+                is_playlist = true;
+            }
+            if (m_expectedPlsFmt == FORMAT_M3U8) {
+                pls = FORMAT_M3U8;
+                is_playlist = true;
+            }
+            if (m_expectedPlsFmt == FORMAT_PLS) {
+                pls = FORMAT_PLS;
+                is_playlist = true;
+            }
             break;
         default: AUDIO_LOG_ERROR("{}, unsupported audio format", ct); return false;
+    }
+
+    m_f_ctIsPlaylist = is_playlist;
+    // Bare text/html / text/plain / octet-stream with no expected audio or playlist.
+    m_f_ctReject = (ct_val == CT_TXT && desired == CODEC_NONE && !is_playlist);
+
+    if (pls != FORMAT_NONE) m_playlistFormat = pls;
+
+    const audiolib::CodecApply action = audiolib::decideCodecApply(m_decoder != nullptr, m_codec, desired, m_f_ogg);
+    switch (action) {
+        case audiolib::CodecApply::KeepActive:
+            // Same codec, playlist, reject, or repeated Ogg CT over a resolved subtype.
+            m_stagedCodec = CODEC_NONE;
+            m_f_stagedOgg = false;
+            break;
+        case audiolib::CodecApply::ApplyNow:
+            m_codec = desired;
+            m_stagedCodec = CODEC_NONE;
+            m_f_stagedOgg = false;
+            if (desired != CODEC_NONE) m_f_ogg = ogg;
+            break;
+        case audiolib::CodecApply::Stage:
+            m_stagedCodec = desired;
+            m_f_stagedOgg = ogg;
+            break;
     }
 
     return true;
@@ -6084,7 +6210,7 @@ int Audio::findNextSync(uint8_t* data, size_t len) {
     return m_fnsy.nextSync;
 }
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
-void Audio::setDecoderItems() {
+bool Audio::setDecoderItems() {
     setChannels(m_decoder->getChannels());
     setSampleRate(m_decoder->getSampleRate());
     setBitsPerSample(m_decoder->getBitsPerSample());
@@ -6099,14 +6225,15 @@ void Audio::setDecoderItems() {
     }
     info(*this, evt_info, "Audio-Data-Start: {}", m_audioDataStart);
 
-    if (getBitsPerSample() != 8 && getBitsPerSample() != 16 && getBitsPerSample() != 24 && getBitsPerSample() != 32) {
-        AUDIO_LOG_ERROR("Bits per sample must be 8, 16, 24 or 32 found {}", getBitsPerSample());
-        stopSong();
-    }
-
-    if (getChannels() != 1 && getChannels() != 2) {
-        AUDIO_LOG_ERROR("Num of channels must be 1 or 2, found {}", getChannels());
-        stopSong();
+    if (!audiolib::sampleFormatUsable(getChannels(), getBitsPerSample())) {
+        if (getBitsPerSample() != 8 && getBitsPerSample() != 16 && getBitsPerSample() != 24 && getBitsPerSample() != 32) {
+            AUDIO_LOG_ERROR("Bits per sample must be 8, 16, 24 or 32 found {}", getBitsPerSample());
+        }
+        if (getChannels() != 1 && getChannels() != 2) {
+            AUDIO_LOG_ERROR("Num of channels must be 1 or 2, found {}", getChannels());
+        }
+        audiolib::requestDecoderCtrl(m_decoderCtrl, audiolib::DecoderCtrl::Stop);
+        return false;
     }
     showCodecParams();
 
@@ -6130,12 +6257,14 @@ void Audio::setDecoderItems() {
     if (m_nominal_bitrate) info(*this, evt_bitrate, "{}", m_nominal_bitrate);
     if (m_audio_file_duration) info(*this, evt_info, "Duration (s): {}", m_audio_file_duration);
     if (m_total_samples_in_file) info(*this, evt_info, "Total samples in file: {}", m_total_samples_in_file);
+    return true;
 }
 // —————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
 uint32_t Audio::decodeError(int8_t res, uint8_t* data, int32_t bytesDecoded) {
     // for(int i = 0; i < 10; i++){printf("0x%02X ", data[i]);} printf("\n");
     if (res == -100) {
-        stopSong();
+        const audiolib::FaultAction act = audiolib::deferredFault(true, false);
+        audiolib::requestDecoderCtrl(m_decoderCtrl, act.publish);
         return bytesDecoded;
     } // serious error, e.g. decoder could not be initialized
     if (m_codec == CODEC_AAC && res == -21) { // mono <-> stereo change
@@ -6157,7 +6286,8 @@ uint32_t Audio::decodeError(int8_t res, uint8_t* data, int32_t bytesDecoded) {
     if (m_codec == CODEC_MP3) {
         if (res == MP3Decoder::MP3_NEED_RESTART) {
             info(*this, evt_info, "" ANSI_ESC_RED "Network error" ANSI_ESC_RESET "");
-            connecttohost(m_lastHost.get());
+            const audiolib::FaultAction act = audiolib::deferredFault(false, true);
+            if (act.publish == audiolib::DecoderCtrl::Reconnect) requestReconnect();
             return 0;
         }
     }
@@ -6222,46 +6352,15 @@ int Audio::sendBytes(uint8_t* data, size_t len) {
     }
     // m_f_playing is true at this pos
 
+    m_sbyt.bytesLeft = len;
+
     if (m_codec == CODEC_NONE && m_playlistFormat == FORMAT_M3U8) return 0; // can happen when the m3u8 playlist is loaded
     if (!m_f_decode_ready) return 0;                                        // find sync first
 
     //-----------------------------------------------------------------
-    int32_t decodeLen = static_cast<int32_t>(len);
-    bool    flacOggPage = false;
-    if (m_codec == CODEC_FLAC && len > 0) {
-        decodeLen = static_cast<int32_t>(audiolib::flacDecodeWindow(data, len, m_sbyt.flacSplitOutput));
-        flacOggPage = (len >= 4 && data[0] == 'O' && data[1] == 'g' && data[2] == 'g' && data[3] == 'S');
-    }
-    m_sbyt.bytesLeft = decodeLen;
-
     res = m_decoder->decode(data, &m_sbyt.bytesLeft, m_outBuff.get());
-    bytesDecoded = decodeLen - m_sbyt.bytesLeft;
-    if (m_codec == CODEC_FLAC && (m_sbyt.bytesLeft < 0 || bytesDecoded < 0)) {
-        m_sbyt.flacSplitOutput = false;
-        return decodeError(-1, data, bytesDecoded > 0 ? bytesDecoded : 0);
-    }
-    // 100 is FLAC_DECODE_FRAMES_LOOP for a native header and FLAC_PARSE_OGG_DONE
-    // for an Ogg page. flacDecodeContinue tells them apart. The window is the
-    // proven frame or page, so this loop cannot enter the next unit.
-    if (res == FlacDecoder::FLAC_DECODE_FRAMES_LOOP && m_codec == CODEC_FLAC && decodeLen > 0) {
-        int spins = 0;
-        int prevUsed = -1;
-        while (audiolib::flacDecodeContinue(res, bytesDecoded, m_sbyt.bytesLeft, static_cast<size_t>(decodeLen), spins, flacOggPage, prevUsed)) {
-            prevUsed = bytesDecoded;
-            uint8_t*  rest = data + bytesDecoded;
-            int32_t   restLeft = m_sbyt.bytesLeft;
-            const int res2 = m_decoder->decode(rest, &restLeft, m_outBuff.get());
-            if (restLeft < 0 || restLeft > m_sbyt.bytesLeft) {
-                res = res2;
-                break;
-            }
-            m_sbyt.bytesLeft = restLeft;
-            bytesDecoded = decodeLen - m_sbyt.bytesLeft;
-            res = res2;
-            ++spins;
-        }
-    }
-    if (m_codec == CODEC_FLAC) m_sbyt.flacSplitOutput = (res == FlacDecoder::GIVE_NEXT_LOOP);
+    bytesDecoded = len - m_sbyt.bytesLeft;
+    //-----------------------------------------------------------------
 
     // res - possible values are:
     //          0: okay, no error
@@ -6269,10 +6368,7 @@ int Audio::sendBytes(uint8_t* data, size_t len) {
     //        < 0: there has been an error
     //       -100: serious error, stop song
 
-    if (res < 0) {
-        m_sbyt.flacSplitOutput = false;
-        return decodeError(res, data, bytesDecoded);
-    }                        // Error, skip the frame...
+    if (res < 0) { return decodeError(res, data, bytesDecoded); }                        // Error, skip the frame...
     if (res > 99) { return decodeContinue(res, data, bytesDecoded, &m_sbyt.bytesLeft); } // decoder needs more data...
 
     if ((bytesDecoded == 0) && (m_codec != CODEC_VORBIS && m_codec != CODEC_FLAC)) { // unlikely framesize, exept VORBIS decodes lastSegmentTable
@@ -6344,7 +6440,10 @@ int Audio::sendBytes(uint8_t* data, size_t len) {
     }
     if (m_sbyt.f_setDecodeParamsOnce && m_validSamples) {
         m_sbyt.f_setDecodeParamsOnce = false;
-        setDecoderItems();
+        if (!setDecoderItems()) {
+            m_validSamples = 0;
+            return bytesDecoded;
+        }
     }
     samples_out = m_validSamples;
 
@@ -8611,6 +8710,7 @@ void Audio::performAudioTask() {
     if (m_decoder) {
         xSemaphoreTake(mutex_audioTask, 0.3 * configTICK_RATE_HZ);
         playAudioData();
+        serviceDecoderCtrl();
         xSemaphoreGive(mutex_audioTask);
         gain_ramp();
         // fade_out_levels(false);

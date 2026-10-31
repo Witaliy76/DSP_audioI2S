@@ -1,14 +1,17 @@
 #pragma once
-// Startup prebuffer contract for AF-2.5 / E-FL3.
+// AF-2.5 / E-FL3 startup helpers — HISTORICAL / host-test only after AF-2.5R.
+//
+// Production Audio.cpp (AF-2.5R) no longer includes this header. Continuous
+// playback uses legacy b5aed2c gates: WebStream filled > maxFrameSize,
+// WebFile filled > 2 * maxBlock, decode when readSpace >= maxBlock.
+//
+// Keep this file for host fixtures that lock legacy* predicates and for
+// archaeology of the rejected early unit-ready path. Do not re-wire it into
+// the hot path without a new stage decision.
 //
 // m_frameSizeFLAC (UINT16_MAX) is the maximum input window a FLAC frame or Ogg
-// page is allowed to occupy. It is not the number of bytes required before the
-// first decode. A native frame is runnable only when its CRC-16 footer matches,
-// proven either because the buffer ends on that frame or because the next
-// header this decoder accepts (0xFFF8) follows it. An Ogg page is runnable once
-// its lacing table is fully present. Anything else keeps the capacity gate.
-// 0xFFF9 is a legal sync in RFC 9639, but decodeFrame() accepts only 0xFFF8,
-// so this scanner does not treat 0xFFF9 as a frame.
+// page is allowed to occupy. AF-2.5 treated a bounded frame/page as enough to
+// open the stream; AF-2.5R does not.
 
 #include <cstddef>
 #include <cstdint>

@@ -1,5 +1,6 @@
-# AF-2.5 host regression. Compiles production src/flac_decoder against shim/.
+# AF-2.5R legacy FLAC buffering host contract.
 # From this directory: powershell -NoProfile -File .\run.ps1
+# Historical AF-2.5 decoder fixture copy: %TEMP%\af25r1\backup_af26\validation\flac_prebuffer\
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -16,17 +17,10 @@ if (-not $compiler) {
 }
 if (-not $compiler) { Write-Error 'g++ not found. Set CXX to a C++17 compiler.' }
 
-$stage = Join-Path $here 'build\stage'
-$decDir = Join-Path $stage 'flac_decoder'
-if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
-New-Item -ItemType Directory -Force -Path $decDir | Out-Null
-Copy-Item (Join-Path $repo 'src\flac_decoder\flac_decoder.cpp') $decDir
-Copy-Item (Join-Path $repo 'src\flac_decoder\flac_decoder.h') $decDir
-Copy-Item (Join-Path $here 'shim\Audio.h') $stage
-Copy-Item (Join-Path $here 'shim\psram_unique_ptr.hpp') $stage
-
-$exe = Join-Path $here 'build\flac_prebuffer_test.exe'
-& $compiler -std=c++17 -O0 -g -w "-I$decDir" -o $exe (Join-Path $here 'flac_prebuffer_test.cpp') (Join-Path $decDir 'flac_decoder.cpp')
+$build = Join-Path $here 'build'
+New-Item -ItemType Directory -Force -Path $build | Out-Null
+$exe = Join-Path $build 'flac_prebuffer_test.exe'
+& $compiler -std=c++17 -O0 -g -w "-I$(Join-Path $repo 'src')" -o $exe (Join-Path $here 'flac_prebuffer_test.cpp')
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $env:PATH = "$(Split-Path $compiler);$env:PATH"
 & $exe

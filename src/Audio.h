@@ -345,7 +345,14 @@ class Audio {
     void                      destroy_decoder();
     void                      latinToUTF8(ps_ptr<char>& buff, bool UTF8check = true);
     void                      htmlToUTF8(char* str);
-    void                      setDefaults(); // free buffers and set defaults
+    bool                      setDefaults(); // free buffers and set defaults; false if the decode mutex was not taken
+    bool                      stopSongWithOwnership(bool clear_pending = true);
+    void                      stopSongLocked();
+    bool                      releaseDecoderOwned(); // destroy live decoder under AF-2.6A mutex; keep client open
+    void                      clearCodecStage();
+    void                      applyStagedCodec();
+    void                      serviceDecoderCtrl();
+    void                      requestReconnect();
     int32_t                   audioFileRead();
     int32_t                   audioFileRead(uint16_t timeout_ms);
     int32_t                   audioFileRead(uint8_t* buff, size_t len);
@@ -373,7 +380,7 @@ class Audio {
     uint32_t                  decodeError(int8_t res, uint8_t* data, int32_t bytesDecoded);
     uint32_t                  decodeContinue(int8_t res, uint8_t* data, int32_t bytesDecoded, int32_t* bytesLeft);
     int                       sendBytes(uint8_t* data, size_t len);
-    void                      setDecoderItems();
+    bool                      setDecoderItems();
     uint32_t                  calculate_average_bitrate(uint64_t sum_bytes_in, uint64_t sum_samples);
     void                      calculateAudioTime(uint16_t bytes_decoder_in, uint16_t samples_decoder_out);
     void                      showID3Tag(const char* tag, const char* val);
@@ -540,7 +547,10 @@ class Audio {
 
     SemaphoreHandle_t mutex_audioTask;
     SemaphoreHandle_t mutex_audioTaskIsDecoding;
-    TaskHandle_t      m_audioTaskHandle = nullptr;
+    std::atomic<uint8_t>  m_decoderCtrl{0};     // audiolib::DecoderCtrl. Stop outranks reconnect.
+    std::atomic<uint32_t> m_streamEpoch{0};     // bumped on successful setDefaults (new user stream)
+    std::atomic<uint32_t> m_reconnectEpoch{0};  // epoch captured when Reconnect was published
+    TaskHandle_t          m_audioTaskHandle = nullptr;
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
@@ -590,7 +600,8 @@ class Audio {
     uint8_t        m_bitsPerSample = 16;           // bitsPerSample
     uint8_t        m_channels = 2;                 //
     uint8_t        m_playlistFormat = 0;           // M3U, PLS, ASX
-    uint8_t        m_codec = CODEC_NONE;           //
+    uint8_t        m_codec = CODEC_NONE;           // active codec; matches live m_decoder when present
+    uint8_t        m_stagedCodec = CODEC_NONE;     // AF-2.6B: Content-Type codec held until owned apply
     uint8_t        m_m3u8Codec = CODEC_AAC;        // codec of m3u8 stream
     uint8_t        m_expectedCodec = CODEC_NONE;   // set in connecttohost (e.g. http://url.mp3 -> CODEC_MP3)
     uint8_t        m_expectedPlsFmt = FORMAT_NONE; // set in connecttohost (e.g. streaming01.m3u) -> FORMAT_M3U)
@@ -645,6 +656,9 @@ class Audio {
     bool       m_f_playing = false;               // valid mp3 stream recognized
     bool       m_f_tts = false;                   // text to speech
     bool       m_f_ogg = false;                   // OGG stream
+    bool       m_f_stagedOgg = false;             // AF-2.6B: ogg flag to apply with m_stagedCodec
+    bool       m_f_ctIsPlaylist = false;          // this HTTP Content-Type named a playlist
+    bool       m_f_ctReject = false;              // this HTTP Content-Type is not audio/playlist media
     bool       m_f_forceMono = false;             // if true stereo -> mono
     bool       m_f_rtsp = false;                  // set if RTSP is used (m3u8 stream)
     bool       m_f_m3u8data = false;              // used in processM3U8entries
